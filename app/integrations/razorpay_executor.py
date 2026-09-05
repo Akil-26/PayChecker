@@ -31,6 +31,7 @@ from app.core.enums import ActionType, ExecutionStatus, PaymentStatus
 from app.core.errors import UnsupportedAction
 from app.core.logging import get_logger
 from app.integrations.action_executor import ActionExecutor, ExecutionResult
+from app.models import Customer
 from app.services.context_builder import RecoveryContext
 from app.services.payment_service import PaymentService
 
@@ -57,14 +58,14 @@ class RazorpayExecutor:
     def _build_client(self):
         try:
             import razorpay
-            return razorpay.Client(
-                auth=(self._settings.razorpay_key_id, self._settings.razorpay_key_secret)
-            )
         except ImportError as exc:
             raise ImportError(
-                "The 'razorpay' package is required for live execution. "
-                "Install it with: pip install razorpay"
+                f"The 'razorpay' package is required for live execution but failed to "
+                f"import ({type(exc).__name__}: {exc}). Install it with: pip install razorpay"
             ) from exc
+        return razorpay.Client(
+            auth=(self._settings.razorpay_key_id, self._settings.razorpay_key_secret)
+        )
 
     @property
     def supported_actions(self) -> frozenset[ActionType]:
@@ -72,6 +73,19 @@ class RazorpayExecutor:
 
     def supports(self, action: ActionType) -> bool:
         return action in _SUPPORTED
+
+    # ── Context helpers ─────────────────────────────────────
+    # RecoveryContext is a flat, frozen dataclass (payment_id, amount, currency,
+    # etc.) — it does NOT carry nested ORM objects. Handlers below that need the
+    # full Payment/Customer row (e.g. to record an attempt, or read a customer's
+    # name) fetch them from the session explicitly, rather than assuming
+    # `context.payment` / `context.customer` are ORM models.
+
+    def _payment(self, context: RecoveryContext):
+        return self._payment_service.get_payment(context.payment_id)
+
+    def _customer_record(self, context: RecoveryContext) -> Customer | None:
+        return self._session.get(Customer, context.customer.customer_id)
 
     # ── Main dispatch ────────────────────────────────────────────────────
 
@@ -89,9 +103,9 @@ class RazorpayExecutor:
         logger.info(
             "razorpay execute | action=%s | payment=%s | amount=%s %s",
             action.value,
-            context.payment.payment_id,
-            context.payment.amount,
-            context.payment.currency,
+            context.payment_id,
+            context.amount,
+            context.currency,
         )
 
         handlers = {
@@ -140,7 +154,7 @@ class RazorpayExecutor:
         logger.info(
             "razorpay schedule | action=%s | payment=%s | due=%s",
             action.value,
-            context.payment.payment_id,
+            context.payment_id,
             scheduled_at.isoformat(),
         )
         return ExecutionResult(
@@ -148,7 +162,7 @@ class RazorpayExecutor:
             status=ExecutionStatus.SCHEDULED,
             provider_response={
                 "scheduled_at": scheduled_at.isoformat(),
-                "payment_id": context.payment.payment_id,
+                "payment_id": context.payment_id,
                 "executor": "razorpay",
             },
             executed_at=self._clock.now(),
@@ -159,7 +173,7 @@ class RazorpayExecutor:
     def _retry_now(self, context: RecoveryContext) -> ExecutionResult:
         """Attempt an immediate charge via Razorpay Orders API."""
         now = self._clock.now()
-        payment = context.payment
+        payment = self._payment(context)
 
         try:
             order = self._client.order.create({
@@ -167,7 +181,7 @@ class RazorpayExecutor:
                 "currency": payment.currency,
                 "receipt":  f"recovery_{payment.payment_id}",
                 "notes": {
-                    "recovery_case_id": context.case.case_id,
+                    "recovery_case_id": context.case_id,
                     "original_payment": payment.payment_id,
                     "action":           "RETRY_NOW",
                 },
@@ -222,7 +236,7 @@ class RazorpayExecutor:
             status=ExecutionStatus.SCHEDULED,
             provider_response={
                 "scheduled_at": due.isoformat(),
-                "payment_id":   context.payment.payment_id,
+                "payment_id":   context.payment_id,
                 "executor":     "razorpay",
             },
             executed_at=now,
@@ -231,8 +245,8 @@ class RazorpayExecutor:
     def _send_payment_link(self, context: RecoveryContext) -> ExecutionResult:
         """Create a Razorpay Payment Link and send it to the customer."""
         now = self._clock.now()
-        payment = context.payment
-        customer = context.customer
+        payment = self._payment(context)
+        customer = self._customer_record(context)
 
         try:
             payload: dict[str, Any] = {
@@ -241,23 +255,17 @@ class RazorpayExecutor:
                 "description": f"Complete your payment of {payment.currency} {payment.amount / 100:.2f}",
                 "reference_id": payment.payment_id,
                 "notes": {
-                    "recovery_case_id": context.case.case_id,
+                    "recovery_case_id": context.case_id,
                     "action": "SEND_PAYMENT_LINK",
                 },
                 "reminder_enable": True,
             }
 
-            # Add customer contact if available
-            if customer:
-                contact: dict[str, Any] = {}
-                if hasattr(customer, "email") and customer.email:
-                    contact["email"] = customer.email
-                if hasattr(customer, "phone") and customer.phone:
-                    contact["contact"] = customer.phone
-                if hasattr(customer, "name") and customer.name:
-                    contact["name"] = customer.name
-                if contact:
-                    payload["customer"] = contact
+            # Add customer name if available. The data model does not currently
+            # capture email/phone, so Razorpay cannot auto-notify a specific
+            # contact; the link itself is still created and returned.
+            if customer is not None and customer.name:
+                payload["customer"] = {"name": customer.name}
 
             link = self._client.payment_link.create(payload)
 
@@ -292,7 +300,7 @@ class RazorpayExecutor:
     def _change_payment_method(self, context: RecoveryContext) -> ExecutionResult:
         """Send a Payment Link that allows the customer to choose a new method."""
         now = self._clock.now()
-        payment = context.payment
+        payment = self._payment(context)
 
         try:
             payload: dict[str, Any] = {
@@ -301,22 +309,16 @@ class RazorpayExecutor:
                 "description":  "Please complete your payment using a different method.",
                 "reference_id": payment.payment_id,
                 "notes": {
-                    "recovery_case_id": context.case.case_id,
+                    "recovery_case_id": context.case_id,
                     "action": "CHANGE_PAYMENT_METHOD",
                     "original_method": payment.payment_method.value if payment.payment_method else "UNKNOWN",
                 },
                 "reminder_enable": True,
             }
 
-            customer = context.customer
-            if customer:
-                contact: dict[str, Any] = {}
-                if hasattr(customer, "email") and customer.email:
-                    contact["email"] = customer.email
-                if hasattr(customer, "phone") and customer.phone:
-                    contact["contact"] = customer.phone
-                if contact:
-                    payload["customer"] = contact
+            customer = self._customer_record(context)
+            if customer is not None and customer.name:
+                payload["customer"] = {"name": customer.name}
 
             link = self._client.payment_link.create(payload)
 
@@ -359,17 +361,17 @@ class RazorpayExecutor:
         """Record escalation. No Razorpay API call — human takes over."""
         logger.warning(
             "escalated to human | case=%s | payment=%s | amount=%s %s",
-            context.case.case_id,
-            context.payment.payment_id,
-            context.payment.amount,
-            context.payment.currency,
+            context.case_id,
+            context.payment_id,
+            context.amount,
+            context.currency,
         )
         return ExecutionResult(
             action=ActionType.ESCALATE_HUMAN,
             status=ExecutionStatus.ESCALATED,
             provider_response={
-                "case_id":    context.case.case_id,
-                "payment_id": context.payment.payment_id,
+                "case_id":    context.case_id,
+                "payment_id": context.payment_id,
                 "executor":   "razorpay",
                 "note":       "Escalated to human agent. No automated action taken.",
             },
@@ -382,8 +384,8 @@ class RazorpayExecutor:
             action=ActionType.STOP,
             status=ExecutionStatus.STOPPED,
             provider_response={
-                "case_id":    context.case.case_id,
-                "payment_id": context.payment.payment_id,
+                "case_id":    context.case_id,
+                "payment_id": context.payment_id,
                 "executor":   "razorpay",
                 "note":       "Recovery stopped per policy.",
             },

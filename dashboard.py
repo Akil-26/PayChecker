@@ -19,6 +19,7 @@ Start dashboard: streamlit run dashboard.py
 from __future__ import annotations
 from typing import Any
 import requests
+# pyrefly: ignore [missing-import]
 import streamlit as st
 
 # ── Constants ─────────────────────────────────────────────────────────────

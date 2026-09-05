@@ -96,16 +96,24 @@ def get_action_executor(
     if resolved.razorpay_configured:
         try:
             from app.integrations.razorpay_executor import RazorpayExecutor
-            logger.info("action executor: RazorpayExecutor (live)")
-            return RazorpayExecutor(
+            executor = RazorpayExecutor(
                 session=session,
                 settings=resolved,
                 clock=resolved_clock,
             )
-        except ImportError:
+            logger.info("action executor: RazorpayExecutor (live)")
+            return executor
+        except ImportError as exc:
             logger.warning(
-                "razorpy package not installed; falling back to simulator. "
-                "Run: pip install razorpay"
+                "razorpay package not installed or failed to import (%s); "
+                "falling back to simulator. Run: pip install razorpay",
+                exc,
+            )
+        except Exception as exc:
+            logger.exception(
+                "RazorpayExecutor failed to initialize (%s: %s); falling back to simulator.",
+                type(exc).__name__,
+                exc,
             )
 
     if resolved.action_executor_impl == "razorpay" and not resolved.razorpay_configured:

@@ -39,7 +39,14 @@ def _build_lifespan(settings: Settings):
         import app.models  # noqa: F401 — registers all ORM models
 
         engine = get_engine()
-        Base.metadata.create_all(bind=engine)
+        if settings.is_production:
+            # Production schema is owned by Alembic migrations (see migrations/),
+            # not by this app creating tables on the fly. Run
+            #   alembic upgrade head
+            # as a deploy step before starting the app.
+            logger.info("Production mode: schema managed by Alembic migrations (not auto-created).")
+        else:
+            Base.metadata.create_all(bind=engine)
 
         db_ok = ping_db()
         clock = get_clock(settings)

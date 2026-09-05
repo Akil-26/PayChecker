@@ -9,14 +9,18 @@ pydantic-settings>=2.4,<3.0
 
 # ── Database ──────────────────────────────────────────────────────────────────
 SQLAlchemy>=2.0,<2.1
+alembic>=1.13,<2.0
 
 # PostgreSQL driver (required in production)
 # Uncomment when deploying to PostgreSQL:
 # psycopg2-binary>=2.9,<3.0
 
 # ── Razorpay integration (required in production) ─────────────────────────────
-# Uncomment when deploying with live Razorpay credentials:
-# razorpay>=1.4,<2.0
+# setuptools<81 pinned because razorpay==1.4.2 internally does `import pkg_resources`,
+# which newer setuptools releases (81+) no longer ship. Modern Python (3.12+) venvs
+# also don't bundle setuptools/pkg_resources by default, so it must be installed explicitly.
+setuptools>=70,<81
+razorpay>=1.4,<2.0
 
 # ── Testing ───────────────────────────────────────────────────────────────────
 pytest>=8.0,<9.0
@@ -27,8 +31,3 @@ httpx>=0.27,<1.0
 # this file so Phase 0's architecture tests can verify the backend stays free
 # of pandas/ML dependencies. Install with:
 #   pip install -r requirements-dashboard.txt
-
-
-streamlit>=1.35,<2.0
-pandas>=2.2,<3.0
-requests>=2.31,<3.0
