@@ -1,0 +1,34 @@
+# Paychecker — backend dependencies
+# Python 3.11+
+
+# ── Core API ──────────────────────────────────────────────────────────────────
+fastapi>=0.115,<1.0
+uvicorn[standard]>=0.30,<1.0
+pydantic>=2.8,<3.0
+pydantic-settings>=2.4,<3.0
+
+# ── Database ──────────────────────────────────────────────────────────────────
+SQLAlchemy>=2.0,<2.1
+
+# PostgreSQL driver (required in production)
+# Uncomment when deploying to PostgreSQL:
+# psycopg2-binary>=2.9,<3.0
+
+# ── Razorpay integration (required in production) ─────────────────────────────
+# Uncomment when deploying with live Razorpay credentials:
+# razorpay>=1.4,<2.0
+
+# ── Testing ───────────────────────────────────────────────────────────────────
+pytest>=8.0,<9.0
+httpx>=0.27,<1.0
+
+# ── Dashboard ─────────────────────────────────────────────────────────────────
+# The Streamlit dashboard (dashboard.py) has its own dependencies, kept out of
+# this file so Phase 0's architecture tests can verify the backend stays free
+# of pandas/ML dependencies. Install with:
+#   pip install -r requirements-dashboard.txt
+
+
+streamlit>=1.35,<2.0
+pandas>=2.2,<3.0
+requests>=2.31,<3.0
